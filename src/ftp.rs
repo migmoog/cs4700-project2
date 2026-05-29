@@ -5,18 +5,23 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use url::Url;
 
+use crate::command::Operation;
+
+/// Wrapper around a TCP socket to use a data channel
+pub struct DataStream(TcpStream);
+
 /// Wrapper around a TCP socket to send commands and parse responses
 pub struct ControlStream(TcpStream);
-impl ControlStream {
-    /// Sends an FTP command on the control channel and blocks until a response is received
-    pub async fn command(&mut self, name: &str, arg: &str) -> Result<(String, u32)> {
-        let command_str = format!("{name} {arg}\r\n");
-        self.0.write_all(command_str.as_bytes()).await?;
 
+impl ControlStream {
+    async fn wait_for_response(&mut self) -> Result<(String, u32)> {
         let mut response_bytes = Vec::new();
         loop {
             let mut buffer = [0u8; 526];
             let bytes_read = self.0.read(&mut buffer).await?;
+            if bytes_read == 0 {
+                return Err(anyhow!("Connection with the server was terminated"));
+            }
             response_bytes.extend_from_slice(&buffer[..bytes_read]);
 
             match parse::response(str::from_utf8(&response_bytes)?) {
@@ -28,10 +33,63 @@ impl ControlStream {
             }
         }
     }
-}
 
-/// Wrapper around a TCP socket to use a data channel
-pub struct DataStream(TcpStream);
+    /// Sends an FTP command on the control channel and blocks until a response is received.
+    /// Does not open a data channel.
+    pub async fn command(&mut self, name: &str, arg: &str) -> Result<(String, u32)> {
+        let command_str = format!("{name} {arg}\r\n");
+        self.0.write_all(command_str.as_bytes()).await?;
+        self.wait_for_response().await
+    }
+
+    /// Similar to `command`, but enters passive mode and opens a data channel.
+    /// Instead of returning a response code and the remaining message,
+    /// it will return the bytes collected off of the data channel
+    pub async fn data_read_command(&mut self, name: &str, arg: &str) -> Result<Vec<u8>> {
+        let (rest, code) = self.command("PASV", "").await?;
+        if code != 227 {
+            return Err(anyhow!(
+                "Failed to enter passive mode. Response: {} {}",
+                code,
+                rest
+            ));
+        }
+
+        // important rust tip for future Jeremy here:
+        // error variants from nom hold references so you have to take ownership
+        let (_, host) = parse::passive_mode_ip_address(&rest)
+            .map_err(|e| anyhow!("failed to parse PASV response: {e}"))?;
+        let mut data_channel = TcpStream::connect(&host).await?;
+
+        let (mut rest, mut code) = self.command(name, arg).await?;
+        loop {
+            println!("Data Read Command Response: {} {}", code, rest);
+            match code {
+                100..=199 => {
+                    (rest, code) = self.wait_for_response().await?;
+                }
+                200..=299 => {
+                    break;
+                }
+                c => return Err(anyhow!("Got code that a data read couldn't handle: {c} {rest}")),
+            }
+        }
+
+        let mut out = Vec::new();
+        out.reserve(4096);
+        loop {
+            let old_len = out.len();
+            let bytes_read = data_channel.read(&mut out[old_len..]).await?;
+            if bytes_read == 0 {
+                break;
+            } else {
+                out.truncate(old_len + bytes_read);
+            }
+        }
+
+        Ok(out)
+    }
+}
 
 /// Takes an FTP url and attempts to connect to it.
 /// Returns a tuple of (control_channel, data_channel)
@@ -77,7 +135,6 @@ pub async fn setup_control(url: &Url) -> Result<ControlStream> {
         let prefix = match code {
             100..=199 => "Positive Prelim",
 
-            // Positive completion reply
             200..=299 => "Positive Completion",
 
             300..=399 => "Positive Intermediate",
