@@ -4,6 +4,8 @@ use clap::Subcommand;
 
 use url::Url;
 
+/// Enum that holds the urls for each file. 
+/// Note: Urls can be local to the file system or to ftp
 #[derive(Subcommand)]
 pub enum Operation {
     Ls { url: Url },

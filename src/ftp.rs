@@ -76,16 +76,7 @@ impl ControlStream {
         }
 
         let mut out = Vec::new();
-        out.reserve(4096);
-        loop {
-            let old_len = out.len();
-            let bytes_read = data_channel.read(&mut out[old_len..]).await?;
-            if bytes_read == 0 {
-                break;
-            } else {
-                out.truncate(old_len + bytes_read);
-            }
-        }
+        data_channel.read_to_end(&mut out).await?;
 
         Ok(out)
     }
