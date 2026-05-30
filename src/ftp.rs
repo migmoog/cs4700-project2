@@ -5,13 +5,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use url::Url;
 
-use crate::command::Operation;
-
-/// Wrapper around a TCP socket to use a data channel
-pub struct DataStream(TcpStream);
-
 /// Wrapper around a TCP socket to send commands and parse responses
 pub struct ControlStream(TcpStream);
+
+pub type FtpResponse = (String, u32);
 
 impl ControlStream {
     async fn wait_for_response(&mut self) -> Result<(String, u32)> {
@@ -36,16 +33,14 @@ impl ControlStream {
 
     /// Sends an FTP command on the control channel and blocks until a response is received.
     /// Does not open a data channel.
-    pub async fn command(&mut self, name: &str, arg: &str) -> Result<(String, u32)> {
+    pub async fn command(&mut self, name: &str, arg: &str) -> Result<FtpResponse> {
         let command_str = format!("{name} {arg}\r\n");
         self.0.write_all(command_str.as_bytes()).await?;
         self.wait_for_response().await
     }
 
-    /// Similar to `command`, but enters passive mode and opens a data channel.
-    /// Instead of returning a response code and the remaining message,
-    /// it will return the bytes collected off of the data channel
-    pub async fn data_read_command(&mut self, name: &str, arg: &str) -> Result<Vec<u8>> {
+    /// Helper that takes care of PASV command boilerplate
+    async fn enter_passive_mode(&mut self) -> Result<TcpStream> {
         let (rest, code) = self.command("PASV", "").await?;
         if code != 227 {
             return Err(anyhow!(
@@ -59,7 +54,15 @@ impl ControlStream {
         // error variants from nom hold references so you have to take ownership
         let (_, host) = parse::passive_mode_ip_address(&rest)
             .map_err(|e| anyhow!("failed to parse PASV response: {e}"))?;
-        let mut data_channel = TcpStream::connect(&host).await?;
+        let data_channel = TcpStream::connect(&host).await?;
+        Ok(data_channel)
+    }
+
+    /// Similar to `command`, but enters passive mode and opens a data channel.
+    /// Instead of returning a response code and the remaining message,
+    /// it will return the bytes collected off of the data channel
+    pub async fn data_read_command(&mut self, name: &str, arg: &str) -> Result<Vec<u8>> {
+        let mut data_channel = self.enter_passive_mode().await?;
 
         let (mut rest, mut code) = self.command(name, arg).await?;
         loop {
@@ -71,7 +74,11 @@ impl ControlStream {
                 200..=299 => {
                     break;
                 }
-                c => return Err(anyhow!("Got code that a data read couldn't handle: {c} {rest}")),
+                c => {
+                    return Err(anyhow!(
+                        "Got code that a data read couldn't handle: {c} {rest}"
+                    ));
+                }
             }
         }
 
@@ -79,6 +86,36 @@ impl ControlStream {
         data_channel.read_to_end(&mut out).await?;
 
         Ok(out)
+    }
+
+    pub async fn data_write_command(
+        &mut self,
+        name: &str,
+        arg: &str,
+        file_data: &[u8],
+    ) -> Result<FtpResponse> {
+        let mut data_channel = self.enter_passive_mode().await?;
+        let (rest, code) = self.command(name, arg).await?;
+        println!("Data Write Command Response: {} {}", code, rest);
+        match code {
+            100..=299 => {
+                data_channel.write_all(file_data).await?;
+                data_channel.shutdown().await?;
+                self.wait_for_response().await
+            }
+            // a refusal from the server, meaning the write should be skipped
+            500..=599 => {
+                if code == 553 {
+                    eprintln!("Couldnt create at path: {}", arg);
+                }
+                return Ok((rest, code));
+            }
+            c => {
+                return Err(anyhow!(
+                    "Got code that a data write couldn't handle: {c} {rest}"
+                ));
+            }
+        }
     }
 }
 
