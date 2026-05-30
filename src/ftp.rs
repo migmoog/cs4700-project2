@@ -11,6 +11,7 @@ pub struct ControlStream(TcpStream);
 pub type FtpResponse = (String, u32);
 
 impl ControlStream {
+    /// Awaits a response from the control channel
     async fn wait_for_response(&mut self) -> Result<(String, u32)> {
         let mut response_bytes = Vec::new();
         loop {
@@ -88,6 +89,8 @@ impl ControlStream {
         Ok(out)
     }
 
+    /// Uses a command that writes to a data channel. Passes a slice of 
+    /// bytes to be written to the socket. 
     pub async fn data_write_command(
         &mut self,
         name: &str,

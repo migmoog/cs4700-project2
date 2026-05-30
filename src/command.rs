@@ -1,7 +1,4 @@
-use std::{
-    path::PathBuf,
-    str::FromStr,
-};
+use std::{path::PathBuf, str::FromStr};
 
 use crate::ftp::{ControlStream, FtpResponse, setup_control};
 use anyhow::{Result, anyhow};
@@ -21,7 +18,10 @@ impl Location {
     /// Copies a file from a local filesystem to a remote one or vice versa.
     /// Prints responses from the server to stdout. If it returns a reponse
     /// that means a file was copied __from__ the __local filesystem__, **to** the **remote filesystem**
-    async fn copy_to(&self, destination: &Location) -> Result<(ControlStream, Option<FtpResponse>)> {
+    async fn copy_to(
+        &self,
+        destination: &Location,
+    ) -> Result<(ControlStream, Option<FtpResponse>)> {
         match (self, destination) {
             (Self::Local(from), Self::Remote(to)) => {
                 let mut control = setup_control(&to).await?;
@@ -45,6 +45,7 @@ impl Location {
         }
     }
 
+    /// Extracts the path from the location
     fn path(&self) -> &str {
         match self {
             Location::Local(path_buf) => path_buf.to_str().unwrap(),
@@ -53,6 +54,7 @@ impl Location {
     }
 }
 
+/// Makes it parseable via command line
 impl FromStr for Location {
     type Err = anyhow::Error;
 
@@ -72,7 +74,7 @@ impl FromStr for Location {
 }
 
 /// Enum that holds the urls for each file.
-/// Note: Urls can be local to the file system or to ftp
+/// Note: Urls can be local to the file system or to ftp only for mv and cp.
 #[derive(Subcommand)]
 pub enum Operation {
     Ls { url: Url },
@@ -125,10 +127,7 @@ pub async fn run(op: Operation) -> Result<()> {
 
             control
         }
-        Operation::Mv {
-            from,
-            to,
-        } => {
+        Operation::Mv { from, to } => {
             let (mut control, response) = from.copy_to(&to).await?;
 
             if let Some((rest, code)) = response {
@@ -136,7 +135,7 @@ pub async fn run(op: Operation) -> Result<()> {
                     "mv from '{:?}' to '{:?}', Response: {} {}",
                     from, to, code, rest
                 );
-                
+
                 if (200..300).contains(&code) {
                     tokio::fs::remove_file(from.path()).await?;
                 } else {
